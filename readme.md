@@ -1,4 +1,4 @@
-# 🧬 Lingo-Style Glucose Intelligence System
+# 🧬 Glucose-Monitoring-Prediction-System
 
 An end-to-end machine learning system that simulates user health data, predicts glucose spikes, and provides personalized behavioral insights and actionable recommendations.
 
