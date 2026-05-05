@@ -1,0 +1,12 @@
+# Streamlit secrets — never commit credentials
+.streamlit/secrets.toml
+
+# Trained model artifact
+ml/model.pkl
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Generated data files
+data/*.csv
