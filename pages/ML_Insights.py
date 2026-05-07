@@ -36,6 +36,10 @@ def load_features():
 def load_model():
     return joblib.load("ml/model.pkl")
 
+@st.cache_resource
+def load_xgb_model():
+    return joblib.load("ml/xgb_model.pkl")
+
 try:
     features_df = load_features()
     model       = load_model()
@@ -45,6 +49,12 @@ except FileNotFoundError as e:
         "Run `python main.py` to generate data and train the model first."
     )
     st.stop()
+
+xgb_model = None
+try:
+    xgb_model = load_xgb_model()
+except FileNotFoundError:
+    pass  # handled gracefully via st.warning when XGBoost is selected
 
 # ─────────────────────────────────────────────────────────────────
 # SIDEBAR — user filter only; window is irrelevant for CSV-based page
@@ -59,48 +69,85 @@ if features_df.empty:
     st.stop()
 
 st.title("🧠 ML Insights")
+
+# ── Model selector ───────────────────────────────────────────────
+model_choice = st.selectbox("Select Model", ["Logistic Regression", "XGBoost"])
+
+if model_choice == "XGBoost":
+    if xgb_model is None:
+        st.warning("⚠️ `ml/xgb_model.pkl` not found. Run `python ml/train_model.py` first.")
+        st.stop()
+    active_model = xgb_model
+else:
+    active_model = model
+
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════
 # SECTION 1 — FEATURE IMPORTANCE
 # ══════════════════════════════════════════════════════════════════
-st.subheader("📊 Feature Importance (Logistic Regression Coefficients)")
-st.caption("Positive coefficient → increases spike risk   |   Negative coefficient → reduces spike risk")
+if model_choice == "Logistic Regression":
+    st.subheader("📊 Feature Importance (Logistic Regression Coefficients)")
+    st.caption("Positive coefficient → increases spike risk   |   Negative coefficient → reduces spike risk")
 
-# Pipeline is: scaler → logreg  (see ml/train_model.py)
-logreg      = model.named_steps["logreg"]
-coefs       = logreg.coef_[0]
+    logreg = active_model.named_steps["logreg"]
+    coefs  = logreg.coef_[0]
 
-importance_df = pd.DataFrame({
-    "feature":     FEATURE_COLS,
-    "coefficient": coefs,
-}).assign(abs_coef=lambda d: d["coefficient"].abs())
-importance_df = importance_df.sort_values("abs_coef", ascending=True)
+    importance_df = pd.DataFrame({
+        "feature":     FEATURE_COLS,
+        "coefficient": coefs,
+    }).assign(abs_coef=lambda d: d["coefficient"].abs())
+    importance_df = importance_df.sort_values("abs_coef", ascending=True)
+    importance_df["direction"] = importance_df["coefficient"].apply(
+        lambda c: "Increases Risk" if c > 0 else "Reduces Risk"
+    )
 
-importance_df["direction"] = importance_df["coefficient"].apply(
-    lambda c: "Increases Risk" if c > 0 else "Reduces Risk"
-)
+    fig_importance = px.bar(
+        importance_df,
+        x="coefficient",
+        y="feature",
+        orientation="h",
+        color="direction",
+        color_discrete_map={"Increases Risk": "#E74C3C", "Reduces Risk": "#2ECC71"},
+        labels={"coefficient": "Coefficient", "feature": "Feature"},
+        title="Feature Importance (Logistic Regression Coefficients)",
+    )
+    fig_importance.update_layout(
+        title_font_size=16,
+        legend_title_text="",
+        xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor="white"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_importance, use_container_width=True)
 
-fig_importance = px.bar(
-    importance_df,
-    x="coefficient",
-    y="feature",
-    orientation="h",
-    color="direction",
-    color_discrete_map={
-        "Increases Risk": "#E74C3C",
-        "Reduces Risk":   "#2ECC71",
-    },
-    labels={"coefficient": "Coefficient", "feature": "Feature"},
-    title="Feature Importance (Logistic Regression Coefficients)",
-)
-fig_importance.update_layout(
-    title_font_size=16,
-    legend_title_text="",
-    xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor="white"),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-)
-st.plotly_chart(fig_importance, use_container_width=True)
+else:  # XGBoost
+    st.subheader("📊 Feature Importance (XGBoost gain)")
+    st.caption("Higher gain → feature contributes more to splits that reduce loss")
+
+    xgb_step = active_model.named_steps["xgb"]
+    gains     = xgb_step.feature_importances_
+
+    importance_df = pd.DataFrame({
+        "feature":    FEATURE_COLS,
+        "importance": gains,
+    }).sort_values("importance", ascending=True)
+
+    fig_importance = px.bar(
+        importance_df,
+        x="importance",
+        y="feature",
+        orientation="h",
+        color="importance",
+        color_continuous_scale="Oranges",
+        labels={"importance": "Gain", "feature": "Feature"},
+        title="Feature Importance (XGBoost gain)",
+    )
+    fig_importance.update_layout(
+        title_font_size=16,
+        coloraxis_showscale=False,
+    )
+    st.plotly_chart(fig_importance, use_container_width=True)
+
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════
@@ -112,7 +159,7 @@ X_all = features_df[FEATURE_COLS]
 y_all = features_df["spike"]
 
 # Use the same 0.6 threshold applied throughout the codebase
-probs_all = model.predict_proba(X_all)[:, 1]
+probs_all = active_model.predict_proba(X_all)[:, 1]
 preds_all = (probs_all >= THRESHOLD).astype(int)
 
 cm = confusion_matrix(y_all, preds_all)
@@ -219,7 +266,7 @@ input_dict = {
 }
 
 input_df   = pd.DataFrame([input_dict])[FEATURE_COLS]
-spike_prob = model.predict_proba(input_df)[0][1]
+spike_prob = active_model.predict_proba(input_df)[0][1]
 spike_pct  = spike_prob * 100
 
 # Risk tier
@@ -279,7 +326,7 @@ st.caption(f"Rows where predicted spike probability > {THRESHOLD:.0%}")
 
 # Re-run on the full (user-filtered) feature set
 X_display     = features_df[FEATURE_COLS]
-spike_probs   = model.predict_proba(X_display)[:, 1]
+spike_probs   = active_model.predict_proba(X_display)[:, 1]
 features_df   = features_df.copy()
 features_df["spike_probability"] = spike_probs.round(3)
 

@@ -36,6 +36,10 @@ def load_features():
 def load_model():
     return joblib.load("ml/model.pkl")
 
+@st.cache_resource
+def load_xgb_model():
+    return joblib.load("ml/xgb_model.pkl")
+
 try:
     features_df = load_features()
     model       = load_model()
@@ -46,42 +50,73 @@ except FileNotFoundError as e:
     )
     st.stop()
 
+xgb_model = None
+try:
+    xgb_model = load_xgb_model()
+except FileNotFoundError:
+    pass  # handled gracefully when XGBoost is selected
+
 # ─────────────────────────────────────────────────────────────────
-# PRE-COMPUTE PREDICTIONS (done once, reused by all sections)
+# PAGE TITLE + MODEL SELECTOR
+# ─────────────────────────────────────────────────────────────────
+st.title("⚙️ Model Monitor")
+
+model_choice = st.selectbox("Select Model", ["Logistic Regression", "XGBoost"])
+
+if model_choice == "XGBoost":
+    if xgb_model is None:
+        st.warning("⚠️ `ml/xgb_model.pkl` not found. Run `python ml/train_model.py` first.")
+        st.stop()
+    active_model = xgb_model
+else:
+    active_model = model
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────────────
+# PRE-COMPUTE PREDICTIONS (reused by all sections)
 # ─────────────────────────────────────────────────────────────────
 X        = features_df[FEATURE_COLS]
 y        = features_df["spike"]
-probs    = model.predict_proba(X)[:, 1]
+probs    = active_model.predict_proba(X)[:, 1]
 preds    = (probs >= THRESHOLD).astype(int)
 
 predictions_df = features_df[["user_id", "timestamp", "prev_glucose", "carbs_last_meal", "spike"]].copy()
 predictions_df["pred_probability"] = probs.round(4)
 predictions_df["pred_spike"]       = preds
 
-# ─────────────────────────────────────────────────────────────────
-# PAGE TITLE
-# ─────────────────────────────────────────────────────────────────
-st.title("⚙️ Model Monitor")
-st.divider()
-
 # ══════════════════════════════════════════════════════════════════
 # SECTION 1 — MODEL INFO
 # ══════════════════════════════════════════════════════════════════
 st.subheader("🗂️ Model Info")
 
-logreg = model.named_steps["logreg"]
-
-model_info = {
-    "model_type":             type(logreg).__name__,
-    "pipeline_steps":         list(model.named_steps.keys()),
-    "num_features":           len(FEATURE_COLS),
-    "feature_names":          FEATURE_COLS,
-    "classification_threshold": THRESHOLD,
-    "training_target":        "spike  (glucose_level > 140 mg/dL)",
-    "class_weight":           str(logreg.class_weight),
-    "max_iter":               logreg.max_iter,
-    "solver":                 logreg.solver,
-}
+if model_choice == "Logistic Regression":
+    logreg = active_model.named_steps["logreg"]
+    model_info = {
+        "model_type":               type(logreg).__name__,
+        "pipeline_steps":           list(active_model.named_steps.keys()),
+        "num_features":             len(FEATURE_COLS),
+        "feature_names":            FEATURE_COLS,
+        "classification_threshold": THRESHOLD,
+        "training_target":          "spike  (glucose_level > 140 mg/dL)",
+        "class_weight":             str(logreg.class_weight),
+        "max_iter":                 logreg.max_iter,
+        "solver":                   logreg.solver,
+    }
+else:  # XGBoost
+    xgb_step = active_model.named_steps["xgb"]
+    model_info = {
+        "model_type":               type(xgb_step).__name__,
+        "pipeline_steps":           list(active_model.named_steps.keys()),
+        "num_features":             len(FEATURE_COLS),
+        "feature_names":            FEATURE_COLS,
+        "classification_threshold": THRESHOLD,
+        "training_target":          "spike  (glucose_level > 140 mg/dL)",
+        "n_estimators":             xgb_step.n_estimators,
+        "max_depth":                xgb_step.max_depth,
+        "eval_metric":              xgb_step.eval_metric,
+        "random_state":             xgb_step.random_state,
+    }
 
 st.json(model_info)
 st.divider()
